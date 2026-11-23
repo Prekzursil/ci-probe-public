@@ -1,0 +1,22 @@
+name: probe-env
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  main-only:
+    runs-on: ubuntu-latest
+    environment: probe-main-only
+    steps:
+      - run: if [ -n "$S" ]; then echo "PROBE=present"; else echo "PROBE=absent"; fi
+        env:
+          S: ${{ secrets.PROBE_SECRET }}
+  agent-branches:
+    runs-on: ubuntu-latest
+    environment: probe-agent-branches
+    steps:
+      - run: if [ -n "$S" ]; then echo "PROBE=present"; else echo "PROBE=absent"; fi
+        env:
+          S: ${{ secrets.PROBE_SECRET }}
