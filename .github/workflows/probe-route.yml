@@ -1,0 +1,11 @@
+name: probe-route
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  route:
+    runs-on: ${{ vars.GATE_ROUTE == 'pool' && fromJSON(format('["self-hosted","gate","gate-{0}","run-{1}"]', vars.GATE_ARCH, github.run_id)) || 'ubuntu-latest' }}
+    steps:
+      - run: echo routed
+  called:
+    uses: ./.github/workflows/probe-called.yml
