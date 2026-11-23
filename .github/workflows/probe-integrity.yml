@@ -1,0 +1,14 @@
+name: probe-integrity
+on:
+  pull_request_target:
+permissions:
+  statuses: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: >
+          gh api -X POST repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}
+          -f state=failure -f context=probe-integrity -f description="base-branch check"
+        env:
+          GH_TOKEN: ${{ github.token }}
