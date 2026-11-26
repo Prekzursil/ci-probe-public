@@ -4,7 +4,7 @@
   "private": true,
   "description": "A0 trials 6 and 8 of a CI build plan: two old dependencies so Dependabot opens a grouped PR; never installed or run",
   "dependencies": {
-    "is-number": "6.0.0",
-    "ms": "2.0.0"
+    "is-number": "7.0.0",
+    "ms": "2.1.3"
   }
 }
