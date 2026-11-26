@@ -1,0 +1,9 @@
+name: probe-route-pr
+on:
+  pull_request:
+permissions: {}
+jobs:
+  route-pr:
+    runs-on: ${{ vars.GATE_ROUTE == 'pool' && fromJSON(format('["self-hosted","gate","gate-{0}","run-{1}"]', vars.GATE_ARCH, github.run_id)) || 'ubuntu-latest' }}
+    steps:
+      - run: echo routed

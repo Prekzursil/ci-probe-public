@@ -1,0 +1,9 @@
+name: probe-route-job-called
+on:
+  workflow_call:
+permissions: {}
+jobs:
+  inner:
+    runs-on: ${{ vars.GATE_ROUTE == 'pool' && fromJSON(format('["self-hosted","gate","gate-{0}","run-{1}-{2}-{3}"]', vars.GATE_ARCH, github.run_id, github.job, strategy.job-index)) || 'ubuntu-latest' }}
+    steps:
+      - run: echo inner
