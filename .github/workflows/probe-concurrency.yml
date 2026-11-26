@@ -1,0 +1,16 @@
+name: probe-concurrency
+# A0 trial 5 (26.11.2026): the concurrency block of Plan A v8 A5 (a), in block form (CI-67). Quick pushes to a PR
+# branch must cancel the older pull_request run; two push runs on a branch without a PR must both complete.
+on:
+  push:
+    branches: ['probe/a0-concurrency-push']
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions: {}
+jobs:
+  wait:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 90; echo "event ${{ github.event_name }} finished"
