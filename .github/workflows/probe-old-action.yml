@@ -1,0 +1,11 @@
+name: probe-old-action
+# A0 trials 6 and 8 (26.11.2026): one old action version, so Dependabot opens a github-actions PR inside .github/.
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: echo "an old action version for a Dependabot trial"
