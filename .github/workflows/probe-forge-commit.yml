@@ -1,0 +1,37 @@
+name: probe-forge-commit
+# A0 trial 6 (26.11.2026; register row CI-68): a commit made through the API with this workflow's token and carrying
+# Dependabot's name, put onto a dependabot/ branch of this probe. Measures what GitHub shows for such a commit (author,
+# committer, verified) and whether its push starts the guard. Refuses any branch outside dependabot/.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: a dependabot/ branch of this probe
+        required: true
+      mode:
+        description: "author: Dependabot's name as author only; both: as author and committer"
+        required: true
+        default: author
+permissions:
+  contents: write
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Commit with Dependabot's name through the API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ inputs.branch }}
+          MODE: ${{ inputs.mode }}
+          RUN: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          case "$BRANCH" in dependabot/*) ;; *) echo "::error::only a dependabot/ branch"; exit 1 ;; esac
+          name='dependabot[bot]'
+          mail='49699333+dependabot[bot]@users.noreply.github.com'
+          content=$(printf 'A0 trial 6: written by a workflow token, run %s\n' "$RUN" | base64 -w0)
+          args=(-X PUT "repos/$REPO/contents/probe-npm/forged-$RUN.txt" -f "message=Bump probe" -f "branch=$BRANCH"
+                -f "content=$content" -f "author[name]=$name" -f "author[email]=$mail")
+          if [ "$MODE" = "both" ]; then args+=(-f "committer[name]=$name" -f "committer[email]=$mail"); fi
+          gh api "${args[@]}" --jq '"forged commit " + .commit.sha'

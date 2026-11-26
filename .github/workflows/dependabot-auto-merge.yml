@@ -1,0 +1,116 @@
+name: dependabot-auto-merge
+
+# Guarded auto-merge for Dependabot PRs (Plan A v8, A5 (c); tried in the public probe in A0 trial 6, 26.11.2026).
+#
+# The version this replaces enabled auto-merge whenever the EVENT's actor was dependabot[bot]; a push by anyone else
+# skipped that job and left an auto-merge that was already on, on. This one runs on every pull_request_target event of
+# the PR, decides on the PR's AUTHOR, and re-reads the PR through the API each time. It never checks out or runs the
+# PR's code, and it uses no action. Auto-merge is enabled only if every check below passes; otherwise it is disabled
+# and the job fails, so the PR waits for the owner:
+#   1. no changed path (nor the previous path of a rename) starts with .github/; every page of the list is read;
+#   2. every commit's API author is dependabot[bot], its committer is web-flow, and GitHub shows it as verified
+#      (Dependabot's own commits have exactly these three; a commit made through the API with a workflow's token can
+#      carry Dependabot's name and a verified signature, but its committer is not web-flow);
+#   3. on a push to the PR (synchronize), the event's sender is dependabot[bot];
+#   4. every API call succeeded and returned at least one file and one commit.
+# A repository variable DEPENDABOT_GUARD_PLANT_FAULT=files makes the file read fail on purpose (the guard's trial); it
+# can only make the guard refuse. The unused dependabot/fetch-metadata step of the old version is gone.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read the PR through the API and decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SENDER: ${{ github.event.sender.login }}
+          ACTION: ${{ github.event.action }}
+          PLANT_FAULT: ${{ vars.DEPENDABOT_GUARD_PLANT_FAULT }}
+        run: |
+          set -uo pipefail
+          WORK="$RUNNER_TEMP/guard"
+          mkdir -p "$WORK"
+          files_path="repos/$REPO/pulls/$PR/files"
+          if [ "${PLANT_FAULT:-}" = "files" ]; then files_path="repos/$REPO/pulls/$PR/files-planted-fault"; fi
+          API_OK=1
+          gh api --paginate "$files_path" --jq '.[] | .filename, (.previous_filename // empty)' > "$WORK/files.txt" || API_OK=0
+          gh api --paginate "repos/$REPO/pulls/$PR/commits" \
+            --jq '.[] | {sha: .sha, author: (.author.login // null), committer: (.committer.login // null), verified: .commit.verification.verified} | @json' \
+            > "$WORK/commits.jsonl" || API_OK=0
+          echo "read: $(wc -l < "$WORK/files.txt") path(s), $(wc -l < "$WORK/commits.jsonl") commit(s); event $ACTION by $SENDER"
+          export API_OK WORK
+          decision=$(python3 - <<'PY'
+          import json
+          import os
+
+
+          def clean(value) -> str:
+              text = "".join(ch for ch in str(value) if ch.isprintable())
+              return text.replace("::", ": :")[:120]
+
+
+          reasons = []
+          if os.environ.get("API_OK") != "1":
+              reasons.append("an API call failed")
+          work = os.environ.get("WORK", ".")
+          files, commits = [], []
+          try:
+              with open(os.path.join(work, "files.txt"), encoding="utf-8") as fh:
+                  files = [ln.strip() for ln in fh if ln.strip()]
+              with open(os.path.join(work, "commits.jsonl"), encoding="utf-8") as fh:
+                  commits = [json.loads(ln) for ln in fh if ln.strip()]
+          except (OSError, ValueError) as exc:
+              reasons.append("the API output could not be read (" + type(exc).__name__ + ")")
+          if not files:
+              reasons.append("no changed file was read")
+          if not commits:
+              reasons.append("no commit was read")
+          under = [f for f in files if f.startswith(".github/")]
+          if under:
+              reasons.append(str(len(under)) + " changed path(s) under .github/, first " + clean(under[0]))
+          for c in commits:
+              sha = clean(c.get("sha"))[:7]
+              if c.get("author") != "dependabot[bot]":
+                  reasons.append("commit " + sha + " author " + clean(c.get("author")))
+              if c.get("committer") != "web-flow":
+                  reasons.append("commit " + sha + " committer " + clean(c.get("committer")))
+              if c.get("verified") is not True:
+                  reasons.append("commit " + sha + " not verified")
+          sender = os.environ.get("SENDER", "")
+          if os.environ.get("ACTION") == "synchronize" and sender != "dependabot[bot]":
+              reasons.append("a push by " + clean(sender))
+          print("enable" if not reasons else "disable: " + "; ".join(reasons))
+          PY
+          ) || decision="disable: the decision step failed"
+          echo "decision: $decision"
+          if [ "$decision" = "enable" ]; then
+            gh pr merge --auto --squash "$PR" --repo "$REPO" && exit 0
+            on=$(gh api "repos/$REPO/pulls/$PR" --jq '.auto_merge != null') || on=unknown
+            if [ "$on" = "true" ]; then echo "auto-merge was already on"; exit 0; fi
+            echo "::error::guard: enabling auto-merge failed"
+            exit 1
+          fi
+          echo "::error::guard: $decision"
+          gh pr merge --disable-auto "$PR" --repo "$REPO" || echo "disable-auto returned non-zero (auto-merge may not have been on)"
+          on=unknown
+          for i in 1 2 3 4; do
+            on=$(gh api "repos/$REPO/pulls/$PR" --jq '.auto_merge != null') || on=unknown
+            [ "$on" = "false" ] && break
+            sleep 2
+          done
+          if [ "$on" != "false" ]; then echo "::error::guard: auto-merge may still be ON (last read: $on); turn it off by hand"; fi
+          exit 1

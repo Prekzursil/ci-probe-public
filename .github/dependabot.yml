@@ -1,0 +1,20 @@
+# A0 trials 6 and 8 of a CI build plan (26.11.2026): Dependabot for a small npm manifest and one workflow, one group per
+# ecosystem, so a grouped manifest-only PR and a grouped PR inside .github/ arrive. Dummy fixture; nothing is installed.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /probe-npm
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    groups:
+      probe-npm-all:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    groups:
+      probe-actions-all:
+        patterns: ["*"]
