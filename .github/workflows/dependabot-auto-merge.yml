@@ -7,14 +7,28 @@ name: dependabot-auto-merge
 # the PR, decides on the PR's AUTHOR, and re-reads the PR through the API each time. It never checks out or runs the
 # PR's code, and it uses no action. Auto-merge is enabled only if every check below passes; otherwise it is disabled
 # and the job fails, so the PR waits for the owner:
-#   1. no changed path (nor the previous path of a rename) starts with .github/; every page of the list is read;
+#   1. no changed path (nor the previous path of a rename) starts with .github/; every page of the list is read, and
+#      the number of files read must equal the PR's changed_files (A0 review round 2, finding 10);
 #   2. every commit's API author is dependabot[bot], its committer is web-flow, and GitHub shows it as verified
-#      (Dependabot's own commits have exactly these three; a commit made through the API with a workflow's token can
-#      carry Dependabot's name and a verified signature, but its committer is not web-flow);
-#   3. on a push to the PR (synchronize), the event's sender is dependabot[bot];
-#   4. every API call succeeded and returned at least one file and one commit.
-# A repository variable DEPENDABOT_GUARD_PLANT_FAULT=files makes the file read fail on purpose (the guard's trial); it
-# can only make the guard refuse. The unused dependabot/fetch-metadata step of the old version is gone.
+#      (Dependabot's own commits have exactly these three; measured in A0 trial 6: a commit with Dependabot's name made
+#      through the API with a workflow's token or the owner's token is unsigned, and its committer is github-actions[bot]
+#      or the name given, never web-flow; its author login can read dependabot[bot], so the author check alone is not
+#      enough);
+#   3. the event's sender is dependabot[bot], on every event: GitHub's own squash commit of a Dependabot PR carries all
+#      three facts of check 2 (probe commit 18c27bd, read 27.11, journal trial r2), so check 2 cannot tell Dependabot's
+#      push from a re-push of such a commit; reopening a Dependabot PR or marking it ready by hand therefore disables
+#      auto-merge too (round 2, finding 5);
+#   4. every API call succeeded and returned at least one file and one commit;
+#   5. the PR's head is read first, the last commit read must be that head, and the enable call names that head
+#      (--match-head-commit). Its exit code is not trusted: the PR is then read twice, 2 s apart, and auto-merge stays
+#      on only if both reads show it on for that head; otherwise it is disabled (round 1, finding 8; round 2, finding 2).
+# Not covered by this guard: a push made with a workflow's token starts no run of this workflow (A0 trial 6, CI-68),
+# and a run that never starts or is cancelled cannot react either, so an auto-merge already on stays on. Whether the
+# repository's required checks then hold the merge is not settled for the three protected repositories (CI-71); A5 (c)
+# enables this guard in a repository only once it is.
+# A repository variable DEPENDABOT_GUARD_PLANT_FAULT=files makes the file read fail on purpose; it can only make the
+# guard refuse, and it stays as the guard's falsification hook (A0 trial 6). The unused dependabot/fetch-metadata step
+# of the old version is gone.
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
@@ -47,12 +61,19 @@ jobs:
           files_path="repos/$REPO/pulls/$PR/files"
           if [ "${PLANT_FAULT:-}" = "files" ]; then files_path="repos/$REPO/pulls/$PR/files-planted-fault"; fi
           API_OK=1
-          gh api --paginate "$files_path" --jq '.[] | .filename, (.previous_filename // empty)' > "$WORK/files.txt" || API_OK=0
+          # the head and the PR's own file count, in one read, before the lists
+          HC=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha + " " + (.changed_files | tostring)') || { API_OK=0; HC=""; }
+          HEAD="${HC%% *}"
+          CHANGED="${HC#* }"
+          if [ "$CHANGED" = "$HC" ]; then CHANGED=""; fi
+          # one line per file: "F <current name>", plus "P <previous name>" for a rename
+          gh api --paginate "$files_path" --jq '.[] | ("F " + .filename), (.previous_filename // empty | "P " + .)' \
+            > "$WORK/files.txt" || API_OK=0
           gh api --paginate "repos/$REPO/pulls/$PR/commits" \
             --jq '.[] | {sha: .sha, author: (.author.login // null), committer: (.committer.login // null), verified: .commit.verification.verified} | @json' \
             > "$WORK/commits.jsonl" || API_OK=0
-          echo "read: $(wc -l < "$WORK/files.txt") path(s), $(wc -l < "$WORK/commits.jsonl") commit(s); event $ACTION by $SENDER"
-          export API_OK WORK
+          echo "read: head ${HEAD:0:7}, changed_files ${CHANGED:-?}, $(wc -l < "$WORK/files.txt") file line(s), $(wc -l < "$WORK/commits.jsonl") commit(s); event $ACTION by $SENDER"
+          export API_OK WORK HEAD CHANGED
           decision=$(python3 - <<'PY'
           import json
           import os
@@ -67,19 +88,36 @@ jobs:
           if os.environ.get("API_OK") != "1":
               reasons.append("an API call failed")
           work = os.environ.get("WORK", ".")
-          files, commits = [], []
+          current, previous, odd, commits = [], [], 0, []
           try:
               with open(os.path.join(work, "files.txt"), encoding="utf-8") as fh:
-                  files = [ln.strip() for ln in fh if ln.strip()]
+                  for ln in fh:
+                      ln = ln.rstrip("\r\n")
+                      if ln.startswith("F "):
+                          current.append(ln[2:])
+                      elif ln.startswith("P "):
+                          previous.append(ln[2:])
+                      elif ln.strip():
+                          odd += 1
               with open(os.path.join(work, "commits.jsonl"), encoding="utf-8") as fh:
                   commits = [json.loads(ln) for ln in fh if ln.strip()]
           except (OSError, ValueError) as exc:
               reasons.append("the API output could not be read (" + type(exc).__name__ + ")")
-          if not files:
+          if odd:
+              reasons.append(str(odd) + " line(s) of the file list could not be read")
+          if not current:
               reasons.append("no changed file was read")
           if not commits:
               reasons.append("no commit was read")
-          under = [f for f in files if f.startswith(".github/")]
+          changed = os.environ.get("CHANGED", "")
+          if not changed.isdigit() or int(changed) != len(current):
+              reasons.append("file count: " + str(len(current)) + " read, the PR lists " + clean(changed or "?"))
+          head = os.environ.get("HEAD", "")
+          if not head:
+              reasons.append("the head could not be read")
+          elif commits and commits[-1].get("sha") != head:
+              reasons.append("the head moved while reading (head " + clean(head)[:7] + ")")
+          under = [f for f in current + previous if f.startswith(".github/")]
           if under:
               reasons.append(str(len(under)) + " changed path(s) under .github/, first " + clean(under[0]))
           for c in commits:
@@ -91,26 +129,32 @@ jobs:
               if c.get("verified") is not True:
                   reasons.append("commit " + sha + " not verified")
           sender = os.environ.get("SENDER", "")
-          if os.environ.get("ACTION") == "synchronize" and sender != "dependabot[bot]":
-              reasons.append("a push by " + clean(sender))
+          if sender != "dependabot[bot]":
+              reasons.append("the event's sender is " + clean(sender) + ", not dependabot[bot]")
           print("enable" if not reasons else "disable: " + "; ".join(reasons))
           PY
           ) || decision="disable: the decision step failed"
           echo "decision: $decision"
           if [ "$decision" = "enable" ]; then
-            gh pr merge --auto --squash "$PR" --repo "$REPO" && exit 0
-            on=$(gh api "repos/$REPO/pulls/$PR" --jq '.auto_merge != null') || on=unknown
-            if [ "$on" = "true" ]; then echo "auto-merge was already on"; exit 0; fi
-            echo "::error::guard: enabling auto-merge failed"
-            exit 1
+            gh pr merge --auto --squash --match-head-commit "$HEAD" "$PR" --repo "$REPO" || echo "the enable call returned non-zero"
+            # its exit code settles nothing either way (it returned 0 on a PR already armed, A0 26.11), so the PR is read
+            # twice, 2 s apart (CI-66), and auto-merge stays on only if both reads show it on for the head checked above
+            s1=$(gh api "repos/$REPO/pulls/$PR" --jq '(.auto_merge != null | tostring) + " " + .head.sha') || s1="unreadable"
+            sleep 2
+            s2=$(gh api "repos/$REPO/pulls/$PR" --jq '(.auto_merge != null | tostring) + " " + .head.sha') || s2="unreadable"
+            if [ "$s1" = "true $HEAD" ] && [ "$s2" = "true $HEAD" ]; then echo "auto-merge is on for head ${HEAD:0:7}, the head checked"; exit 0; fi
+            decision="disable: after the enable call auto-merge is not on for head ${HEAD:0:7} (reads: ${s1:0:50} / ${s2:0:50})"
           fi
           echo "::error::guard: $decision"
           gh pr merge --disable-auto "$PR" --repo "$REPO" || echo "disable-auto returned non-zero (auto-merge may not have been on)"
+          # off only when two consecutive reads, 2 s apart, show it off (CI-66)
           on=unknown
-          for i in 1 2 3 4; do
+          streak=0
+          for i in 1 2 3 4 5 6; do
             on=$(gh api "repos/$REPO/pulls/$PR" --jq '.auto_merge != null') || on=unknown
-            [ "$on" = "false" ] && break
+            if [ "$on" = "false" ]; then streak=$((streak + 1)); else streak=0; fi
+            [ "$streak" -ge 2 ] && break
             sleep 2
           done
-          if [ "$on" != "false" ]; then echo "::error::guard: auto-merge may still be ON (last read: $on); turn it off by hand"; fi
+          if [ "$streak" -lt 2 ]; then echo "::error::guard: auto-merge may still be ON (last read: $on); turn it off by hand"; fi
           exit 1
