@@ -8,7 +8,7 @@ updates:
       interval: daily
     open-pull-requests-limit: 5
     groups:
-      probe-npm-r2:
+      probe-npm-r2b:
         patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
