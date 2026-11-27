@@ -1,0 +1,11 @@
+name: probe-aa1-main
+# A0 review round 3 (27.11.2026): AA-1 on the default branch. Runs on pushes to main.
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  ran:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "ran on $GITHUB_SHA"
