@@ -17,15 +17,24 @@ name: dependabot-auto-merge
 #   3. the event's sender is dependabot[bot], on every event: GitHub's own squash commit of a Dependabot PR carries all
 #      three facts of check 2 (probe commit 18c27bd, read 27.11, journal trial r2), so check 2 cannot tell Dependabot's
 #      push from a re-push of such a commit; reopening a Dependabot PR or marking it ready by hand therefore disables
-#      auto-merge too (round 2, finding 5);
+#      auto-merge too (round 2, finding 5); and the run itself was started by dependabot[bot] (github.triggering_actor):
+#      a re-run keeps the original sender, so without this a re-run by anyone with write access was judged on the
+#      commits and files alone (round 3, finding 5);
 #   4. every API call succeeded and returned at least one file and one commit;
 #   5. the PR's head is read first, the last commit read must be that head, and the enable call names that head
-#      (--match-head-commit). Its exit code is not trusted: the PR is then read twice, 2 s apart, and auto-merge stays
-#      on only if both reads show it on for that head; otherwise it is disabled (round 1, finding 8; round 2, finding 2).
+#      (--match-head-commit; GitHub refuses a stale head even when auto-merge is already on, CI-74). Its exit code is not
+#      trusted: the PR is then read twice, 2 s apart, and auto-merge stays on only if both reads show it on for that head;
+#      otherwise it is disabled (round 1, finding 8; round 2, finding 2).
+# On a PR that is already mergeable (merge state CLEAN, HAS_HOOKS or UNSTABLE), `gh pr merge --auto` merges at once
+# instead of arming auto-merge (gh's merge.go: autoMerge only when !isImmediatelyMergeable); the merge is still pinned to
+# the head checked, and a read that shows the PR merged at that head counts as success (round 3, finding 7). So in a
+# repository with no required checks, this guard merges a clean Dependabot PR at once, before any CI.
 # Not covered by this guard: a push made with a workflow's token starts no run of this workflow (A0 trial 6, CI-68),
 # and a run that never starts or is cancelled cannot react either, so an auto-merge already on stays on. Whether the
 # repository's required checks then hold the merge is not settled for the three protected repositories (CI-71); A5 (c)
-# enables this guard in a repository only once it is.
+# enables this guard in a repository only once it is. Also not covered: a re-run of a run of an OLDER version of this
+# file executes that older file (CI-76); and arming a Dependabot PR by hand or by an automation starts no run of this
+# workflow (`auto_merge_enabled` is not a trigger: adding it would also undo the owner's own arming; owner question).
 # A repository variable DEPENDABOT_GUARD_PLANT_FAULT=files makes the file read fail on purpose; it can only make the
 # guard refuse, and it stays as the guard's falsification hook (A0 trial 6). The unused dependabot/fetch-metadata step
 # of the old version is gone.
@@ -52,6 +61,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           SENDER: ${{ github.event.sender.login }}
+          TRIGGER: ${{ github.triggering_actor }}
           ACTION: ${{ github.event.action }}
           PLANT_FAULT: ${{ vars.DEPENDABOT_GUARD_PLANT_FAULT }}
         run: |
@@ -72,7 +82,7 @@ jobs:
           gh api --paginate "repos/$REPO/pulls/$PR/commits" \
             --jq '.[] | {sha: .sha, author: (.author.login // null), committer: (.committer.login // null), verified: .commit.verification.verified} | @json' \
             > "$WORK/commits.jsonl" || API_OK=0
-          echo "read: head ${HEAD:0:7}, changed_files ${CHANGED:-?}, $(wc -l < "$WORK/files.txt") file line(s), $(wc -l < "$WORK/commits.jsonl") commit(s); event $ACTION by $SENDER"
+          echo "read: head ${HEAD:0:7}, changed_files ${CHANGED:-?}, $(wc -l < "$WORK/files.txt") file line(s), $(wc -l < "$WORK/commits.jsonl") commit(s); event $ACTION by $SENDER, run started by $TRIGGER"
           export API_OK WORK HEAD CHANGED
           decision=$(python3 - <<'PY'
           import json
@@ -131,6 +141,9 @@ jobs:
           sender = os.environ.get("SENDER", "")
           if sender != "dependabot[bot]":
               reasons.append("the event's sender is " + clean(sender) + ", not dependabot[bot]")
+          trigger = os.environ.get("TRIGGER", "")
+          if trigger != "dependabot[bot]":
+              reasons.append("the run was started by " + clean(trigger) + ", not dependabot[bot] (a re-run keeps the sender)")
           print("enable" if not reasons else "disable: " + "; ".join(reasons))
           PY
           ) || decision="disable: the decision step failed"
@@ -138,11 +151,15 @@ jobs:
           if [ "$decision" = "enable" ]; then
             gh pr merge --auto --squash --match-head-commit "$HEAD" "$PR" --repo "$REPO" || echo "the enable call returned non-zero"
             # its exit code settles nothing either way (it returned 0 on a PR already armed, A0 26.11), so the PR is read
-            # twice, 2 s apart (CI-66), and auto-merge stays on only if both reads show it on for the head checked above
-            s1=$(gh api "repos/$REPO/pulls/$PR" --jq '(.auto_merge != null | tostring) + " " + .head.sha') || s1="unreadable"
+            # twice, 2 s apart (CI-66), and auto-merge stays on only if both reads show it on for the head checked above;
+            # a read showing the PR merged at that head (gh merges at once when the PR is already mergeable) is success
+            s1=$(gh api "repos/$REPO/pulls/$PR" --jq '(.auto_merge != null | tostring) + " " + .head.sha + " " + (.merged | tostring)') || s1="unreadable"
             sleep 2
-            s2=$(gh api "repos/$REPO/pulls/$PR" --jq '(.auto_merge != null | tostring) + " " + .head.sha') || s2="unreadable"
-            if [ "$s1" = "true $HEAD" ] && [ "$s2" = "true $HEAD" ]; then echo "auto-merge is on for head ${HEAD:0:7}, the head checked"; exit 0; fi
+            s2=$(gh api "repos/$REPO/pulls/$PR" --jq '(.auto_merge != null | tostring) + " " + .head.sha + " " + (.merged | tostring)') || s2="unreadable"
+            if [ "$s1" = "true $HEAD false" ] && [ "$s2" = "true $HEAD false" ]; then echo "auto-merge is on for head ${HEAD:0:7}, the head checked"; exit 0; fi
+            for s in "$s1" "$s2"; do
+              case "$s" in "true $HEAD true"|"false $HEAD true") echo "merged at once at head ${HEAD:0:7}, the head checked (the PR was already mergeable)"; exit 0 ;; esac
+            done
             decision="disable: after the enable call auto-merge is not on for head ${HEAD:0:7} (reads: ${s1:0:50} / ${s2:0:50})"
           fi
           echo "::error::guard: $decision"
